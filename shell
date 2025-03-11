@@ -1,1 +1,116 @@
 
+#!/bin/bash  + teams api 腳本
+#TOKEN2="nmcxRT6dZbujxIQILAMLcc4U32f7RK5u6khIFlIvlaO" #tim
+TOKEN="CFUsCwwtP4wEWLClGNnqlYta7f2QCPo6gINdOFtILKZ"
+server_date=$(date "+%Y-%m-%d %H:%M")
+server_name=$(hostname)
+shell_pwd="/home/zk3040/script/apache_status"
+#判斷現在BusyWorkers的數值
+BusyWorkers=$(curl -s http://127.0.0.1:7080/server-status?auto |grep BusyWorkers |awk '{print $2}')
+
+#teams url
+api_host="https://prod-36.southeastasia.logic.azure.com:443/workflows/e972fdbd82be4ee397d7668d20320bec/triggers/manual/paths/invoke?api-version=2016-06-01&sp=%2Ftriggers%2Fmanual%2Frun&sv=1.0&sig=7x1FaUO6v-3Dvt4ZAldUo2_Sq6lk4BNmjdAcKwRFtRA"
+
+#載入teams 所需function 
+source $shell_pwd/teams.sh
+
+#白名單加入數組
+whitelist=$(cat $shell_pwd/ddos_whitelist.txt |awk '{print $1}')
+whitelist_ip=()
+for i in ${whitelist[*]}
+do
+whitelist_ip[${#whitelist_ip[*]}]=${i}
+done
+
+#判斷busyworkers 達到設定數值就可以進行確認是否有攻擊行為
+if [  $BusyWorkers  -gt 180 ]
+then
+#下載apaceh_status 頁面並轉成output.html檔案
+get=$(wget  -q -O $shell_pwd/output.html http://127.0.0.1:7080/server-status)
+#輸出現在apache 的訪問區塊
+status_output=$( grep -Po "<td>\K(.*:7080|.*:7081)"  $shell_pwd/output.html |sed 's/<\/td><td nowrap>/,/' |sort |uniq -c |sort -nr |head -n 5 |sed  's/^\s*//;s/ /,/g')
+#抓出現在apache 的workers區塊
+w=$(sed -n '/<pre>/,/<\/pre>/p' $shell_pwd/output.html)
+# 整理資訊，輸出到message.txt
+echo -e "$server_date\n $server_name\n BusyWorkers:$BusyWorkers\n $status_output\n $w"> $shell_pwd/message.txt
+message=$(cat $shell_pwd/message.txt)
+
+curl https://notify-api.line.me/api/notify -H "Authorization: Bearer ${TOKEN}" -d "message=$message"
+#將message 裡的ip 與 值整理加入數組
+teams_domain_info=()
+for ii in ${status_output[*]}
+do
+  teams_domain_info[${#teams_domain_info[*]}]=${ii}
+done
+teams_in_json1=$(echo {\"type\": \"TextBlock\", \"text\":\"${teams_domain_info[0]}\", \"wrap\": true},)
+teams_in_json2=$(echo {\"type\": \"TextBlock\", \"text\":\"${teams_domain_info[1]}\", \"wrap\": true},)
+teams_in_json3=$(echo {\"type\": \"TextBlock\", \"text\":\"${teams_domain_info[2]}\", \"wrap\": true},)
+teams_in_json4=$(echo {\"type\": \"TextBlock\", \"text\":\"${teams_domain_info[3]}\", \"wrap\": true},)
+teams_in_json5=$(echo {\"type\": \"TextBlock\", \"text\":\"${teams_domain_info[4]}\", \"wrap\": true})
+#呼叫teams_api function 並將變數值存成json格式
+teams_api > $shell_pwd/teams.json
+#將資訊發送至teams
+curl  -i --location --request  POST "${api_host}" --header 'Content-Type: application/json' --data  @"$shell_pwd"/teams.json
+
+###判斷ddos or dos  處
+chk_apa_info=$(cat $shell_pwd/message.txt | sed -e '1,3d' | grep  -P "(.*:7080|.*:7081)" |awk -F "," '{print $1}' > $shell_pwd/file.txt)
+while read -r value domain ;do
+if [ "$value" -ge 50 ];then
+###判斷ddos or dos  處
+
+#抓取ip欄位
+#output_ip_info=$(cat $shell_pwd/message.txt |sed -e '1,3d'|awk '{print $2}' |sed '/^$/d' |awk -F "," '{print $1}')
+output_ip_info=$(cat $shell_pwd/message.txt | sed -e '1,3d' | grep  -P "(.*:7080|.*:7081)" |awk -F "," '{print $2}')
+    for i in $output_ip_info
+    do
+        #判定ip來源
+         search_city_info=$(curl -s ipinfo.io/"$i"/country?TOKEN=$TOKEN)
+        #如果ip不在白名單中
+        if  [[ ! "${whitelist_ip[*]}" =~ "$i" ]]
+        then
+          #如果是非台灣ip
+            if [  $search_city_info != TW ]
+            then
+                 search_message_file=$( grep "$i" $shell_pwd/message.txt )
+                 fd_frequency=$(echo $search_message_file |awk -F "," '{print $1}')
+                 fd_ip=$(echo $search_message_file |awk -F "," '{print $2}')
+                 #連線大於50
+                 if [ $fd_frequency -gt 50 ]
+                 then
+                      firewall-cmd --zone=drop --add-source=$fd_ip
+                      firewall-cmd --runtime-to-permanent
+                      curl https://notify-api.line.me/api/notify -H "Authorization: Bearer ${TOKEN}" -d "message=contry: $search_city_info  次數:$fd_frequency $fd_ip 已進行封鎖"
+#將資訊發送至teams
+                      teams_api_firewalld > $shell_pwd/teams_api_firewalld.json
+                      curl  -i --location --request  POST "${api_host}" --header 'Content-Type: application/json' --data  @"$shell_pwd"/teams_api_firewalld.json
+                 fi
+            else
+                search_message_file=$( grep "$i" $shell_pwd/message.txt )
+                fd_frequency=$(echo $search_message_file |awk -F "," '{print $1}')
+                fd_ip=$(echo $search_message_file |awk -F "," '{print $2}')
+                #TW 連線大於100
+                 if [ $fd_frequency -gt 100 ]
+                 then
+                      firewall-cmd --zone=drop --add-source=$fd_ip
+                      firewall-cmd --runtime-to-permanent
+                      curl https://notify-api.line.me/api/notify -H "Authorization: Bearer ${TOKEN}" -d "message=contry: $search_city_info  次數:$fd_frequency $fd_ip 已進行封鎖"
+                      teams_api_firewalld > $shell_pwd/$shell_teams_api_firewalld.json
+                      curl  -i --location --request  POST "${api_host}" --header 'Content-Type: application/json' --data  @"$shell_pwd"/teams_api_firewalld.json
+                 fi
+            fi
+         fi
+    done
+    exit 0
+fi ###判斷ddos or dos  處
+done < $shell_pwd/file.txt
+ddos_chack_domain=$( grep -Po "<td nowrap>\K(.*:7080|.*:7081)" $shell_pwd/output.html |awk -F ":" '{print $1}' |sort |uniq -c |sort -nr |head -1 )
+curl https://notify-api.line.me/api/notify -H "Authorization: Bearer ${TOKEN}" -d "message=$ddos_chack_domain 遭ddos 攻擊"
+teams_api_ddos >  "$shell_pwd"/teams_ddos.json
+curl  -i --location --request  POST "${api_host}" --header 'Content-Type: application/json' --data  @"$shell_pwd"/teams_ddos.json
+
+rm $shell_pwd/file.txt
+###判斷ddos or dos  處
+
+rm $shell_pwd/output.html
+#rm $shell_pwd/message.txt
+fi
